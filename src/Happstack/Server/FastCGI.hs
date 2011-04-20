@@ -19,10 +19,13 @@ import Control.Applicative
 import Data.Char (toLower)
 import Data.List (isPrefixOf)
 import Happstack.Server
-import Happstack.Server.HTTP.Types (Request (..), Version (Version))
+import Happstack.Server.Types (Request (..), HttpVersion (HttpVersion))
+import Happstack.Server.Internal.Cookie(parseCookies)
+import Happstack.Server.Internal.Monads(runServerPartT, unWebT)
 import Network.CGI.Monad (CGIRequest, cgiVars, cgiRequestBody, cgiGet)
 import Network.CGI.Protocol (maybeRead)
 import Network.FastCGI
+import Control.Concurrent.MVar
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.UTF8 as UBS
 import qualified Data.Map as M
@@ -57,15 +60,18 @@ setHappstackHeader (HeaderPair k v) =
 toHappstackRequest :: CGIRequest -> CGI Request
 toHappstackRequest rq = do
   i <- cgiInputs
+  mvInputsBody <- liftIO $ newEmptyMVar
+  mvBody <- liftIO $ newMVar $ cgiBody rq
   return $ Request { rqMethod  = cgiMethod  rq
                    , rqPaths   = cgiPaths   rq
                    , rqUri	   = cgiUri     rq
                    , rqQuery   = cgiQuery   rq
-                   , rqInputs  = i
+                   , rqInputsQuery  = i
+                   , rqInputsBody = mvInputsBody
                    , rqCookies = cgiCookies rq
                    , rqVersion = cgiVersion rq
                    , rqHeaders = cgiHeaders rq
-                   , rqBody    = cgiBody    rq
+                   , rqBody    = mvBody
                    , rqPeer    = cgiPeer    rq
                    }
 
@@ -101,7 +107,7 @@ cgiInputs = getInputNames >>= mapM toHappstackInput
 cgiCookies :: CGIRequest -> [(String, H.Cookie)]
 cgiCookies = map cookieWithName . either (const []) id . parseCookies . str "HTTP_COOKIE"
 
-cgiVersion :: CGIRequest -> Version
+cgiVersion :: CGIRequest -> HttpVersion
 cgiVersion = parseProtocol . str "SERVER_PROTOCOL"
 
 cgiHeaders :: CGIRequest -> Headers
@@ -135,10 +141,10 @@ filterKey f = filter (f . fst)
 
 
 -- | Parse the HTTP protocol
-parseProtocol :: String -> Version
-parseProtocol "HTTP/0.9" = Version 0 9
-parseProtocol "HTTP/1.0" = Version 1 0
-parseProtocol "HTTP/1.1" = Version 1 1
+parseProtocol :: String -> HttpVersion
+parseProtocol "HTTP/0.9" = HttpVersion 0 9
+parseProtocol "HTTP/1.0" = HttpVersion 1 0
+parseProtocol "HTTP/1.1" = HttpVersion 1 1
 parseProtocol _          = error "Invalid HTTP Version"
 
 -- | Gives an input key/value given an input key
@@ -147,7 +153,7 @@ toHappstackInput k = do
   filename    <- getInputFilename k
   value       <- withDef (BS.empty) <$> getInputFPS k
   contentType <- withDef ""         <$> getInputContentType k
-  return (k,  Input { inputValue       = value
+  return (k,  Input { inputValue       = Right value
                     , inputFilename    = filename
                     , inputContentType = convertContentType $ parseContentType contentType 
                     })
@@ -160,10 +166,7 @@ convertContentType Nothing                        = error "No correct content-ty
 
 -- | Transforms a ServerPartT into a function. This is a copy of simpleHTTP'
 processRequest :: (ToMessage b, Monad m, Functor m) => ServerPartT m b -> Request -> m Response
-processRequest hs req =  (runWebT $ runServerPartT hs req) >>= (return . (maybe standardNotFound id))
-    where
-        standardNotFound = H.setHeader "Content-Type" "text/html" $ toResponse "Not found"
-
+processRequest = simpleHTTP'' 
 
 --------------------------------------------------
 -- Copied straight from Lemmih's old happs-fastcgi
