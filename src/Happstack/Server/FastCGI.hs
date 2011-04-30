@@ -31,6 +31,7 @@ import qualified Data.ByteString.UTF8 as UBS
 import qualified Data.Map as M
 import qualified Happstack.Server as H
 import qualified Network.CGI as CGI
+import System.IO(openFile,IOMode(..),hSeek,SeekMode(..),hSetBinaryMode)
 
 -- | Converts a Happstack ServerPartT to a CGI handling function.
 serverPartToCGI :: (ToMessage b) => ServerPartT IO b -> CGI CGIResult
@@ -49,7 +50,21 @@ toCGIResponse r = do
   let c  = rsCode r'
   CGI.setStatus c (responseMessage c)
   mapM_ setHappstackHeader (M.elems $ rsHeaders r')
-  outputFPS (rsBody r')
+  case r' of
+    Response {} -> do
+      outputFPS (rsBody r')
+    SendFile {} -> do
+      let path = sfFilePath r'
+          offset = sfOffset r'
+          count = sfCount r'
+      contents <- liftIO $ fileContents path offset
+      outputFPS $ BS.take (fromInteger count) contents
+        where
+          fileContents path offset = do
+            handle <- openFile path ReadMode
+            hSetBinaryMode handle True
+            hSeek handle AbsoluteSeek offset
+            BS.hGetContents handle      
 
 -- | Sets all the headers coming from Happstack
 setHappstackHeader :: HeaderPair -> CGI ()
